@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0a0a0f" />
+    <meta name="description" content="GestureVerse — Control 3D worlds with your hands. An immersive gesture-controlled experience hub powered by MediaPipe and Three.js." />
+
+    <!-- Open Graph -->
+    <meta property="og:title" content="GestureVerse" />
+    <meta property="og:description" content="Control 3D worlds with your hands." />
+    <meta property="og:type" content="website" />
+
+    <title>GestureVerse — Control 3D with Gestures</title>
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+
+    <!-- MediaPipe (loaded here so they are available globally before app boots) -->
+    <script
+            src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"
+            crossorigin="anonymous"
+    ></script>
+    <script
+            src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"
+            crossorigin="anonymous"
+    ></script>
+    <script
+            src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"
+            crossorigin="anonymous"
+    ></script>
+
+    <style>
+        /* Prevent flash of unstyled content */
+        html { background: #0a0a0f; }
+        #root { opacity: 0; animation: reveal 0.3s ease 0.1s forwards; }
+        @keyframes reveal { to { opacity: 1; } }
+    </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="module" src="/src/main.tsx"></script>
+</body>
+</html>
