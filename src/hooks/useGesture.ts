@@ -1,234 +1,321 @@
-import { useEffect, useRef, useCallback } from "react";
-import { useGestureStore } from "@/store/gestureStore";
+// src/hooks/useGesture.ts
+
+import { useEffect, useRef, useCallback } from 'react'
+import { useGestureStore } from '../store/gestureStore'
 import {
-    classifyGesture,
+    buildGestureResult,
+    normalizeLandmarks,
     detectSwipe,
-    getPalmCenter,
-} from "@/lib/gestureInterpreter";
-import type { HandLandmark, DetectedHand } from "@/store/gestureStore";
+    detectWave,
+    detectSnap,
+    detectOrbit,
+    calcTwoHandData,
+    CONTINUOUS_GESTURES,
+    DISCRETE_GESTURES,
+    createWaveState,
+    createSnapState,
+    createOrbitState,
+    type GestureName,
+} from '../lib/gestureInterpreter'
+import type { GestureEvent, DetectedHand } from '../store/gestureStore'
 
-declare global {
-    interface Window {
-        Hands: new (config: object) => MediaPipeHands;
-        Camera: new (video: HTMLVideoElement, config: object) => MediaPipeCamera;
-        drawConnectors: (ctx: CanvasRenderingContext2D, landmarks: HandLandmark[], connections: unknown[], style: object) => void;
-        drawLandmarks: (ctx: CanvasRenderingContext2D, landmarks: HandLandmark[], style: object) => void;
-        HAND_CONNECTIONS: unknown[];
-    }
+// ─── Constants ─────────────────────────────────────────
+
+const FRAME_SKIP = 2
+const HOLD_DURATION_MS = 2000
+const POWER_MODE_DURATION = 5000
+const BOTH_HANDS_HOLD_MS = 800
+
+// ─── Types ─────────────────────────────────────────────
+
+interface MediaPipeResult {
+    multiHandLandmarks?: { x: number; y: number; z: number }[][]
+    multiHandedness?: { label: 'Left' | 'Right'; score: number }[]
 }
 
-interface MediaPipeHands {
-    setOptions: (options: object) => void;
-    onResults: (callback: (results: MediaPipeResults) => void) => void;
-    send: (inputs: { image: HTMLVideoElement }) => Promise<void>;
-    close: () => void;
+// MediaPipe constructor types
+type HandsInstance = {
+    setOptions: (opts: any) => void
+    onResults: (fn: (r: MediaPipeResult) => void) => void
+    send: (data: { image: HTMLVideoElement }) => Promise<void>
 }
 
-interface MediaPipeCamera {
-    start: () => void;
-    stop: () => void;
+type CameraInstance = {
+    start: () => void
+    stop: () => void
 }
 
-interface MediaPipeResults {
-    multiHandLandmarks: HandLandmark[][];
-    multiHandedness: Array<{ label: string; score: number }>;
-}
+type HandsConstructor = new (opts: any) => HandsInstance
+type CameraConstructor = new (
+    video: HTMLVideoElement,
+    opts: { onFrame: () => Promise<void>; width: number; height: number }
+) => CameraInstance
 
-interface UseGestureOptions {
-    videoRef: React.RefObject<HTMLVideoElement>;
-    canvasRef?: React.RefObject<HTMLCanvasElement>;
-    enabled?: boolean;
-    drawSkeleton?: boolean;
-    onGesture?: (gesture: string, confidence: number) => void;
+// ─── Hook ──────────────────────────────────────────────
+
+interface UseGestureProps {
+    videoRef: React.RefObject<HTMLVideoElement>
+    canvasRef?: React.RefObject<HTMLCanvasElement>
+    enabled?: boolean
+    drawSkeleton?: boolean
+    onGesture?: (gesture: string, confidence: number) => void
 }
 
 export function useGesture({
                                videoRef,
                                canvasRef,
                                enabled = true,
-                               drawSkeleton = true,
+                               drawSkeleton = false,
                                onGesture,
-                           }: UseGestureOptions) {
-    const handsRef = useRef<MediaPipeHands | null>(null);
-    const cameraRef = useRef<MediaPipeCamera | null>(null);
-    const frameCountRef = useRef(0);
-    const lastFpsUpdate = useRef(Date.now());
-    const lastFrameTime = useRef(Date.now());
+                           }: UseGestureProps) {
+    const store = useGestureStore.getState
 
-    const {
-        sensitivity,
-        setDetectedHands,
-        setCurrentGesture,
-        setLastGestureEvent,
-        setEngineReady,
-        setFps,
-        setLatency,
-        pushLandmarkHistory,
-        landmarkHistory,
-        isCalibrated,
-    } = useGestureStore();
+    const frameCountRef = useRef(0)
+    const lastDetectTime = useRef(0)
 
-    const processResults = useCallback(
-        (results: MediaPipeResults) => {
-            const now = Date.now();
-            setLatency(now - lastFrameTime.current);
-            lastFrameTime.current = now;
+    const waveStateRef = useRef(createWaveState())
+    const snapStateLeftRef = useRef(createSnapState())
+    const snapStateRightRef = useRef(createSnapState())
+    const orbitStateRef = useRef(createOrbitState())
 
-            // FPS counter
-            frameCountRef.current++;
-            if (now - lastFpsUpdate.current >= 1000) {
-                setFps(frameCountRef.current);
-                frameCountRef.current = 0;
-                lastFpsUpdate.current = now;
+    const holdStartRef = useRef<number | null>(null)
+    const holdNameRef = useRef<GestureName | null>(null)
+    const bothHandsOpenStartRef = useRef<number | null>(null)
+
+    const prevTwoHandDataRef = useRef(store().twoHandData)
+
+    const leftSwipeRef = useRef(store().leftSwipeState)
+    const rightSwipeRef = useRef(store().rightSwipeState)
+
+    const fpsFrames = useRef<number[]>([])
+
+    // ─── Event Dispatcher ──────────────────────────────
+
+    const dispatchGestureEvent = useCallback(
+        (gesture: GestureName, hand: 'Left' | 'Right' | null, extra: Partial<GestureEvent> = {}) => {
+            const s = store()
+
+            if (DISCRETE_GESTURES.has(gesture) && s.isGestureDebounced(gesture)) return
+
+            const event: GestureEvent = {
+                gesture,
+                hand,
+                confidence: extra.confidence ?? s.currentConfidence,
+                position: extra.position ?? null,
+                velocity: extra.velocity ?? null,
+                palmCenter: extra.palmCenter ?? null,
+                pinchDistance: extra.pinchDistance ?? 0,
+                twoHandDistance: extra.twoHandDistance ?? null,
+                twoHandAngle: extra.twoHandAngle ?? null,
+                elapsed: extra.elapsed ?? 0,
+                landmarks: extra.landmarks ?? null,
+                timestamp: Date.now(),
+                isDoubleSwipe: extra.isDoubleSwipe ?? false,
             }
 
-            // Draw skeleton on canvas
-            if (canvasRef?.current && drawSkeleton && videoRef.current) {
-                const ctx = canvasRef.current.getContext("2d");
-                if (ctx) {
-                    canvasRef.current.width = videoRef.current.videoWidth;
-                    canvasRef.current.height = videoRef.current.videoHeight;
-                    ctx.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
-
-                    if (results.multiHandLandmarks && window.drawConnectors && window.HAND_CONNECTIONS) {
-                        for (const landmarks of results.multiHandLandmarks) {
-                            window.drawConnectors(ctx, landmarks, window.HAND_CONNECTIONS, {
-                                color: "rgba(99, 102, 241, 0.6)",
-                                lineWidth: 2,
-                            });
-                            window.drawLandmarks(ctx, landmarks, {
-                                color: "rgba(34, 211, 238, 0.9)",
-                                lineWidth: 1,
-                                radius: 3,
-                            });
-                        }
-                    }
-                }
+            if (DISCRETE_GESTURES.has(gesture)) {
+                s.updateGestureDebounce(gesture)
             }
 
-            if (!results.multiHandLandmarks || results.multiHandLandmarks.length === 0) {
-                setDetectedHands([]);
-                setCurrentGesture("none", 0);
-                return;
-            }
-
-            // Build detected hands
-            const detectedHands: DetectedHand[] = results.multiHandLandmarks.map(
-                (landmarks, i) => {
-                    const handedness = results.multiHandedness[i];
-                    const { gesture, confidence } = classifyGesture(landmarks, sensitivity);
-                    return {
-                        landmarks,
-                        handedness: handedness?.label as "Left" | "Right",
-                        gesture,
-                        confidence,
-                    };
-                }
-            );
-
-            setDetectedHands(detectedHands);
-
-            // Use dominant hand (index 0 for now)
-            const primary = detectedHands[0];
-            if (!primary) return;
-
-            // Push to history for swipe detection
-            pushLandmarkHistory(primary.landmarks);
-
-            // Check swipe
-            const swipe = detectSwipe(landmarkHistory);
-            const finalGesture = swipe ?? { gesture: primary.gesture, confidence: primary.confidence };
-
-            setCurrentGesture(finalGesture.gesture, finalGesture.confidence);
-
-            if (finalGesture.gesture !== "none" && finalGesture.confidence > 0.6) {
-                const palmPos = getPalmCenter(primary.landmarks);
-                const event = {
-                    gesture: finalGesture.gesture,
-                    hand: primary.handedness,
-                    confidence: finalGesture.confidence,
-                    timestamp: now,
-                    position: palmPos,
-                };
-                setLastGestureEvent(event);
-                onGesture?.(finalGesture.gesture, finalGesture.confidence);
-            }
+            s.fireGestureEvent(event)
+            s.setCurrentGesture(gesture, event.confidence, hand)
+            onGesture?.(gesture, event.confidence)
         },
-        [
-            sensitivity,
-            canvasRef,
-            drawSkeleton,
-            videoRef,
-            setDetectedHands,
-            setCurrentGesture,
-            setLastGestureEvent,
-            setFps,
-            setLatency,
-            pushLandmarkHistory,
-            landmarkHistory,
-            onGesture,
-        ]
-    );
+        []
+    )
+
+    // ─── MediaPipe Handler ─────────────────────────────
+
+    const onResults = useCallback(
+        (results: MediaPipeResult) => {
+            const now = Date.now()
+            const s = store()
+
+            fpsFrames.current.push(now)
+            fpsFrames.current = fpsFrames.current.filter(t => now - t < 1000)
+
+            const fps = fpsFrames.current.length
+            const latency = now - lastDetectTime.current
+            lastDetectTime.current = now
+
+            s.updatePerformance(fps, latency)
+
+            if (!results.multiHandLandmarks?.length) {
+                s.updateDetectedHands([])
+                s.setCurrentGesture('none', 0, null)
+                holdStartRef.current = null
+                holdNameRef.current = null
+                bothHandsOpenStartRef.current = null
+                return
+            }
+
+            frameCountRef.current++
+            const shouldClassify = frameCountRef.current % FRAME_SKIP === 0
+
+            const detectedHands: DetectedHand[] = []
+
+            for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+                const raw = results.multiHandLandmarks[i]
+                const handednessInfo = results.multiHandedness?.[i]
+
+                if (!raw || !handednessInfo) continue
+
+                const handedness = handednessInfo.label
+                const landmarks = normalizeLandmarks(raw)
+
+                if (!shouldClassify) {
+                    const prev = s.detectedHands.find(h => h.handedness === handedness)
+                    if (prev) detectedHands.push({ ...prev, landmarks })
+                    continue
+                }
+
+                const result = buildGestureResult(landmarks, handedness)
+
+                const hand: DetectedHand = {
+                    handedness,
+                    landmarks,
+                    gesture: result.gesture,
+                    confidence: result.confidence,
+                    palmCenter: result.palmCenter,
+                    pinchDistance: result.pinchDistance,
+                    wristTiltAngle: result.wristTiltAngle,
+                    palmFacingCamera: result.palmFacingCamera,
+                    fingersExtended: result.fingersExtended,
+                }
+
+                detectedHands.push(hand)
+
+                const swipeState =
+                    handedness === 'Left' ? leftSwipeRef.current : rightSwipeRef.current
+
+                const { swipe, shouldClearHistory, isDoubleSwipe } = detectSwipe(
+                    swipeState,
+                    result.palmCenter,
+                    now
+                )
+
+                if (shouldClearHistory) swipeState.history = []
+
+                if (swipe) {
+                    dispatchGestureEvent(swipe, handedness, {
+                        confidence: 0.9,
+                        palmCenter: result.palmCenter,
+                        isDoubleSwipe,
+                    })
+                }
+
+                const snapState =
+                    handedness === 'Left'
+                        ? snapStateLeftRef.current
+                        : snapStateRightRef.current
+
+                if (detectSnap(snapState, result.pinchDistance)) {
+                    dispatchGestureEvent('snap', handedness, {
+                        confidence: 0.95,
+                        palmCenter: result.palmCenter,
+                        pinchDistance: result.pinchDistance,
+                    })
+                }
+
+                if (detectWave(waveStateRef.current, result.palmCenter.x, now)) {
+                    dispatchGestureEvent('wave', handedness, {
+                        confidence: 0.9,
+                        palmCenter: result.palmCenter,
+                    })
+                }
+
+                if (detectOrbit(orbitStateRef.current, result.palmCenter)) {
+                    const oc = orbitStateRef.current
+                    s.setOrbitActive(true, oc.center ?? undefined, oc.radius)
+                } else {
+                    s.setOrbitActive(false)
+                }
+
+                const frame = new Float32Array(63)
+                landmarks.forEach((lm, idx) => {
+                    frame[idx * 3] = lm.x
+                    frame[idx * 3 + 1] = lm.y
+                    frame[idx * 3 + 2] = lm.z
+                })
+                s.pushLandmarkHistory(frame)
+            }
+
+            s.updateDetectedHands(detectedHands)
+        },
+        [dispatchGestureEvent]
+    )
+
+    // ─── MediaPipe Init ────────────────────────────────
 
     useEffect(() => {
-        if (!enabled || !videoRef.current) return;
-        if (!isCalibrated) return;
+        if (!enabled) return
+        const video = videoRef.current
+        if (!video) return
 
-        let mounted = true;
+        let hands: HandsInstance | null = null
+        let camera: CameraInstance | null = null
+        let destroyed = false
 
-        const initMediaPipe = async () => {
-            // Load MediaPipe via CDN scripts (injected in index.html)
-            const waitForMediaPipe = (): Promise<void> =>
-                new Promise((resolve) => {
-                    const check = () => {
-                        if (window.Hands) resolve();
-                        else setTimeout(check, 100);
-                    };
-                    check();
-                });
+        async function init() {
+            console.log("🧠 MediaPipe init starting");
+            const win = window as any
 
-            await waitForMediaPipe();
-            if (!mounted) return;
-
-            handsRef.current = new window.Hands({
-                locateFile: (file: string) =>
-                    `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
-            });
-
-            handsRef.current.setOptions({
-                maxNumHands: 2,
-                modelComplexity: 1,
-                minDetectionConfidence: 0.7,
-                minTrackingConfidence: 0.6,
-            });
-
-            handsRef.current.onResults(processResults);
-
-            if (videoRef.current) {
-                cameraRef.current = new window.Camera(videoRef.current, {
-                    onFrame: async () => {
-                        if (handsRef.current && videoRef.current) {
-                            await handsRef.current.send({ image: videoRef.current });
-                        }
-                    },
-                    width: 640,
-                    height: 480,
-                });
-                cameraRef.current.start();
+            // Wait until MediaPipe is available
+            while (!win.Hands || !win.Camera) {
+                console.log("⏳ waiting for MediaPipe...");
+                await new Promise(res => setTimeout(res, 100));
             }
 
-            setEngineReady(true);
-        };
+            const HandsClass = win.Hands as HandsConstructor
+            const CameraClass = win.Camera as CameraConstructor
 
-        initMediaPipe();
+            hands = new HandsClass({
+
+                locateFile: (file: string) =>
+                    `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`,
+            })
+
+            hands.setOptions({
+                maxNumHands: 2,
+                modelComplexity: 0,
+                minDetectionConfidence: 0.65,
+                minTrackingConfidence: 0.55,
+            })
+
+            hands.onResults(onResults)
+
+            const videoEl = video as HTMLVideoElement
+
+            camera = new CameraClass(videoEl, {
+                onFrame: async () => {
+                    console.log("🎥 frame tick");
+                    if (destroyed) return
+                    if (videoEl.readyState === 4) {
+                        await hands!.send({ image: videoEl })
+                    }
+                },
+                width: 640,
+                height: 480,
+            })
+
+            camera.start()
+
+            useGestureStore.getState().setCameraActive(true)
+            useGestureStore.getState().setMediaPipeReady(true)
+        }
+
+        init().catch(err => {
+            console.error(err)
+            useGestureStore.getState().setCameraError(String(err))
+        })
 
         return () => {
-            mounted = false;
-            cameraRef.current?.stop();
-            handsRef.current?.close();
-            setEngineReady(false);
-        };
-    }, [enabled, videoRef, processResults, setEngineReady, isCalibrated]);
+            destroyed = true
+            camera?.stop()
+            useGestureStore.getState().setCameraActive(false)
+            useGestureStore.getState().setMediaPipeReady(false)
+        }
+    }, [videoRef, onResults, enabled])
 
-    return { handsRef, cameraRef };
+    return {}
 }
