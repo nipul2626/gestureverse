@@ -1,99 +1,175 @@
-import { motion, AnimatePresence } from "framer-motion";
-import { useGestureStore } from "@/store/gestureStore";
-import { GESTURE_LABELS, GESTURE_EMOJI } from "@/lib/gestureInterpreter";
-import Badge from "@/components/UI/Badge";
+// src/components/Gestures/GestureHUD.tsx
+// GestureVerse v2 — Live gesture HUD with confidence bar, FPS, latency.
+// Framer Motion pulse animation on gesture fire. Power Mode display.
+
+import { useEffect, useRef } from 'react'
+import { motion, useAnimation } from 'framer-motion'
+import { useGestureStore } from '@/store/gestureStore.ts'
+import type { GestureName } from '@/lib/gestureInterpreter.ts'
+
+// ─── Gesture Display Names ────────────────────────────────────────────────────
+const GESTURE_LABELS: Record<GestureName, string> = {
+    open_palm: '🖐 Open Palm',
+    closed_fist: '✊ Fist',
+    pinch: '🤏 Pinch',
+    pointing: '☝️ Pointing',
+    peace: '✌️ Peace',
+    thumbs_up: '👍 Thumbs Up',
+    thumbs_down: '👎 Thumbs Down',
+    swipe_left: '← Swipe Left',
+    swipe_right: '→ Swipe Right',
+    swipe_up: '↑ Swipe Up',
+    swipe_down: '↓ Swipe Down',
+    rotate_cw: '↻ Rotate CW',
+    rotate_ccw: '↺ Rotate CCW',
+    zoom_in: '🔍 Zoom In',
+    zoom_out: '🔎 Zoom Out',
+    snap: '👌 Snap',
+    wave: '👋 Wave',
+    grab: '🫳 Grab',
+    magnetic_pull: '🧲 Magnetic',
+    wrist_tilt: '↗ Tilt',
+    none: '— No Gesture',
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 interface GestureHUDProps {
-    position?: "top-left" | "top-right" | "bottom-left" | "bottom-right";
-    compact?: boolean;
+    /** Whether to show expanded stats */
+    showStats?: boolean
+    className?: string
 }
 
-const positionClasses = {
-    "top-left": "top-4 left-4",
-    "top-right": "top-4 right-4",
-    "bottom-left": "bottom-4 left-4",
-    "bottom-right": "bottom-4 right-4",
-};
+export function GestureHUD({ showStats = true, className = '' }: GestureHUDProps) {
+    const currentGesture = useGestureStore(s => s.currentGesture)
+    const currentConfidence = useGestureStore(s => s.currentConfidence)
+    const currentHand = useGestureStore(s => s.currentHand)
+    const fps = useGestureStore(s => s.fps)
+    const latencyMs = useGestureStore(s => s.latencyMs)
+    const powerMode = useGestureStore(s => s.powerMode)
+    const lastGestureEvent = useGestureStore(s => s.lastGestureEvent)
 
-export default function GestureHUD({
-                                       position = "bottom-right",
-                                       compact = false,
-                                   }: GestureHUDProps) {
-    const { currentGesture, gestureConfidence, fps, latency, engineReady, detectedHands } =
-        useGestureStore();
+    const borderControls = useAnimation()
+    const prevEventRef = useRef(lastGestureEvent)
 
-    if (!engineReady) return null;
+    // Pulse border on gesture fire
+    useEffect(() => {
+        if (!lastGestureEvent || lastGestureEvent === prevEventRef.current) return
+        prevEventRef.current = lastGestureEvent
 
-    const label = GESTURE_LABELS[currentGesture];
-    const emoji = GESTURE_EMOJI[currentGesture];
-    const isActive = currentGesture !== "none" && gestureConfidence > 0.5;
+        borderControls.start({
+            boxShadow: [
+                '0 0 0 0 rgba(255, 255, 255, 0)',
+                '0 0 0 2px rgba(255, 255, 255, 0.8)',
+                '0 0 0 0 rgba(255, 255, 255, 0)',
+            ],
+            transition: { duration: 0.2, ease: 'easeOut' },
+        })
+    }, [lastGestureEvent, borderControls])
+
+    const isActive = currentGesture !== 'none'
+    const label = GESTURE_LABELS[currentGesture] ?? currentGesture
+
+    // Confidence bar color
+    const confColor =
+        currentConfidence > 0.8
+            ? '#22d3ee'
+            : currentConfidence > 0.6
+                ? '#a78bfa'
+                : '#6366f1'
 
     return (
-        <div className={`fixed ${positionClasses[position]} z-40 flex flex-col gap-2 items-end`}>
-            {/* Main gesture display */}
-            <AnimatePresence mode="wait">
+        <motion.div
+            animate={borderControls}
+            className={`
+        backdrop-blur-xl rounded-xl border
+        bg-white/[0.04] border-white/[0.08]
+        overflow-hidden min-w-[200px]
+        ${powerMode ? 'border-cyan-400/60 shadow-[0_0_20px_rgba(34,211,238,0.3)]' : ''}
+        ${className}
+      `}
+            style={{ boxShadow: '0 0 0 0 rgba(255,255,255,0)' }}
+        >
+            {/* Power Mode Banner */}
+            {powerMode && (
                 <motion.div
-                    key={currentGesture}
-                    initial={{ opacity: 0, y: 10, scale: 0.9 }}
-                    animate={{ opacity: 1, y: 0, scale: 1 }}
-                    exit={{ opacity: 0, y: -10, scale: 0.9 }}
-                    transition={{ duration: 0.2 }}
-                    className={`glass rounded-2xl px-4 py-3 flex items-center gap-3 min-w-[160px] ${
-                        isActive ? "neon-border-cyan" : ""
-                    }`}
+                    initial={{ opacity: 0, y: -10 }}
+                    animate={{ opacity: [0.7, 1, 0.7], y: 0 }}
+                    transition={{ opacity: { repeat: Infinity, duration: 0.8 } }}
+                    className="bg-cyan-500/20 border-b border-cyan-400/30 px-3 py-1 text-center"
                 >
-                    <span className="text-2xl">{emoji}</span>
-                    <div className="flex-1 min-w-0">
-                        <p className={`text-sm font-semibold truncate ${isActive ? "text-cyan-400" : "text-gray-500"}`}>
-                            {isActive ? label : "No Gesture"}
-                        </p>
-                        {isActive && (
-                            <div className="flex items-center gap-1.5 mt-0.5">
-                                <div className="flex-1 h-1 bg-white/10 rounded-full overflow-hidden">
-                                    <motion.div
-                                        className="h-full bg-gradient-to-r from-indigo-500 to-cyan-500 rounded-full"
-                                        style={{ width: `${gestureConfidence * 100}%` }}
-                                        layoutId="confidence-bar"
-                                    />
-                                </div>
-                                <span className="text-xs text-gray-500 font-mono">
-                  {Math.round(gestureConfidence * 100)}%
-                </span>
-                            </div>
-                        )}
-                    </div>
+          <span className="text-cyan-300 text-[10px] font-bold tracking-[0.2em] uppercase">
+            ⚡ POWER MODE
+          </span>
                 </motion.div>
-            </AnimatePresence>
-
-            {/* Stats row */}
-            {!compact && (
-                <div className="flex items-center gap-2">
-                    <div className="glass rounded-xl px-3 py-1.5 flex items-center gap-2">
-            <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                    detectedHands.length > 0 ? "bg-emerald-400 animate-pulse" : "bg-gray-600"
-                }`}
-            />
-                        <span className="text-xs font-mono text-gray-400">
-              {detectedHands.length === 0
-                  ? "No hands"
-                  : detectedHands.length === 1
-                      ? "1 hand"
-                      : "2 hands"}
-            </span>
-                    </div>
-
-                    <div className="glass rounded-xl px-3 py-1.5">
-            <span className="text-xs font-mono text-gray-500">
-              {fps}
-                <span className="text-gray-600">fps</span>
-                {" · "}
-                {latency}
-                <span className="text-gray-600">ms</span>
-            </span>
-                    </div>
-                </div>
             )}
-        </div>
-    );
+
+            <div className="p-3 space-y-2">
+                {/* Gesture Name */}
+                <div className="flex items-center justify-between gap-3">
+                    <motion.span
+                        key={currentGesture}
+                        initial={{ opacity: 0, y: 4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        transition={{ duration: 0.15 }}
+                        className={`text-sm font-medium ${isActive ? 'text-white' : 'text-white/40'}`}
+                    >
+                        {label}
+                    </motion.span>
+
+                    {/* Hand indicator */}
+                    {currentHand && (
+                        <span
+                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded-full ${
+                                currentHand === 'Left'
+                                    ? 'bg-violet-500/30 text-violet-300'
+                                    : 'bg-cyan-500/30 text-cyan-300'
+                            }`}
+                        >
+              {currentHand === 'Left' ? 'L' : 'R'}
+            </span>
+                    )}
+                </div>
+
+                {/* Confidence Bar */}
+                <div className="h-1 w-full bg-white/10 rounded-full overflow-hidden">
+                    <motion.div
+                        className="h-full rounded-full"
+                        animate={{ width: `${currentConfidence * 100}%` }}
+                        transition={{ duration: 0.1, ease: 'linear' }}
+                        style={{ backgroundColor: confColor }}
+                    />
+                </div>
+
+                {/* Confidence Percentage */}
+                <div className="flex justify-between items-center">
+                    <span className="text-[10px] text-white/40">Confidence</span>
+                    <span className="text-[10px] text-white/60 font-mono">
+            {(currentConfidence * 100).toFixed(0)}%
+          </span>
+                </div>
+
+                {/* Stats Row */}
+                {showStats && (
+                    <div className="flex gap-3 pt-1 border-t border-white/[0.06]">
+                        <div className="flex-1 text-center">
+                            <div className="text-[10px] text-white/40">FPS</div>
+                            <div className={`text-xs font-mono font-bold ${fps >= 25 ? 'text-emerald-400' : fps >= 15 ? 'text-amber-400' : 'text-red-400'}`}>
+                                {fps}
+                            </div>
+                        </div>
+                        <div className="w-px bg-white/[0.06]" />
+                        <div className="flex-1 text-center">
+                            <div className="text-[10px] text-white/40">ms</div>
+                            <div className={`text-xs font-mono font-bold ${latencyMs < 50 ? 'text-emerald-400' : latencyMs < 100 ? 'text-amber-400' : 'text-red-400'}`}>
+                                {latencyMs}
+                            </div>
+                        </div>
+                    </div>
+                )}
+            </div>
+        </motion.div>
+    )
 }
+
+export default GestureHUD
