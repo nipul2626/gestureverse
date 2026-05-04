@@ -1,130 +1,377 @@
-import { create } from "zustand";
+// src/store/gestureStore.ts
+// GestureVerse v2 — Extended Zustand store with all Phase 1-6 state.
 
-export type GestureName =
-    | "open_palm"
-    | "closed_fist"
-    | "pointing"
-    | "pinch"
-    | "peace"
-    | "thumbs_up"
-    | "thumbs_down"
-    | "swipe_left"
-    | "swipe_right"
-    | "swipe_up"
-    | "swipe_down"
-    | "rotate_cw"
-    | "rotate_ccw"
-    | "zoom_in"
-    | "zoom_out"
-    | "none";
+import { create } from 'zustand'
+import { subscribeWithSelector } from 'zustand/middleware'
+import type {
+    GestureName,
+    LandmarkPoint,
+    TwoHandData,
+    SwipeState,
+    WaveState,
+    SnapState,
+    OrbitState,
+} from '../lib/gestureInterpreter'
+import {
+    createWaveState,
+    createSnapState,
+    createOrbitState,
+} from '../lib/gestureInterpreter'
 
-export interface HandLandmark {
-    x: number;
-    y: number;
-    z: number;
-}
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface DetectedHand {
-    landmarks: HandLandmark[];
-    handedness: "Left" | "Right";
-    gesture: GestureName;
-    confidence: number;
+    handedness: 'Left' | 'Right'
+    landmarks: LandmarkPoint[]
+    gesture: GestureName
+    confidence: number
+    palmCenter: LandmarkPoint
+    pinchDistance: number
+    wristTiltAngle: number
+    palmFacingCamera: boolean
+    fingersExtended: boolean[]
+}
+
+export interface GrabState {
+    isGrabbing: boolean
+    objectId: string | null
+    hand: 'Left' | 'Right' | null
+    grabOffset: { x: number; y: number; z: number }
+    velocity: { x: number; y: number; z: number }
 }
 
 export interface GestureEvent {
-    gesture: GestureName;
-    hand: "Left" | "Right";
-    confidence: number;
-    timestamp: number;
-    velocity?: { x: number; y: number };
-    position?: { x: number; y: number };
+    gesture: GestureName
+    hand: 'Left' | 'Right' | null
+    confidence: number
+    position: { x: number; y: number } | null
+    velocity: { x: number; y: number } | null
+    palmCenter: LandmarkPoint | null
+    pinchDistance: number
+    twoHandDistance: number | null
+    twoHandAngle: number | null
+    elapsed: number
+    landmarks: LandmarkPoint[] | null
+    timestamp: number
+    isDoubleSwipe?: boolean
 }
+
+export type CalibrationStep = 'idle' | 'open_palm' | 'fist' | 'pinch' | 'pointing' | 'complete'
+
+// ─── Store State Interface ────────────────────────────────────────────────────
 
 interface GestureState {
-    // Camera & engine
-    cameraActive: boolean;
-    engineReady: boolean;
-    webcamSupported: boolean;
+    // ── Camera & Engine ──────────────────────────────────────────────────────
+    isCameraActive: boolean
+    cameraError: string | null
+    isMediaPipeReady: boolean
+    webcamSupported: boolean
+    isCalibrated: boolean
+    calibrationStep: CalibrationStep
+    // ── Detection Results ─────────────────────────────────────────────────────
+    detectedHands: DetectedHand[]
+    currentGesture: GestureName
+    currentConfidence: number
+    currentHand: 'Left' | 'Right' | null
+    setHand: (hand: 'Left' | 'Right' | null) => void
 
-    // Detection results
-    detectedHands: DetectedHand[];
-    currentGesture: GestureName;
-    gestureConfidence: number;
-    lastGestureEvent: GestureEvent | null;
+    // ── Performance ───────────────────────────────────────────────────────────
+    fps: number
+    latencyMs: number
+    frameCount: number
+    lastFrameTime: number
+    sensitivity: number  // 0.5–1.5 multiplier
 
-    // Calibration
-    isCalibrated: boolean;
-    calibrationStep: number;
-    sensitivity: number;
-    dominantHand: "left" | "right";
+    // ── Landmark History (typed arrays for perf) ──────────────────────────────
+    landmarkHistory: Float32Array[]  // last 30 frames × 63 floats (21 pts × xyz)
+    historyMaxLength: number
 
-    // Performance
-    fps: number;
-    latency: number;
+    // ── Swipe / Discrete State ─────────────────────────────────────────────────
+    swipeState: SwipeState        // per-hand — primary hand only
+    leftSwipeState: SwipeState
+    rightSwipeState: SwipeState
+    gestureDebounceMap: Map<GestureName, number>
 
-    // Gesture history (for velocity/swipe detection)
-    landmarkHistory: HandLandmark[][];
+    // ── Wave ──────────────────────────────────────────────────────────────────
+    waveState: WaveState
+    lastSwipeGesture: GestureName | null
+    lastSwipeTime: number
 
-    // Actions
-    setCameraActive: (active: boolean) => void;
-    setEngineReady: (ready: boolean) => void;
-    setWebcamSupported: (supported: boolean) => void;
-    setDetectedHands: (hands: DetectedHand[]) => void;
-    setCurrentGesture: (gesture: GestureName, confidence: number) => void;
-    setLastGestureEvent: (event: GestureEvent) => void;
-    setCalibrated: (calibrated: boolean) => void;
-    setCalibrationStep: (step: number) => void;
-    setSensitivity: (sensitivity: number) => void;
-    setDominantHand: (hand: "left" | "right") => void;
-    setFps: (fps: number) => void;
-    setLatency: (latency: number) => void;
-    pushLandmarkHistory: (landmarks: HandLandmark[]) => void;
-    reset: () => void;
+    // ── Snap ──────────────────────────────────────────────────────────────────
+    snapState: SnapState
+
+    // ── Grab / Object Manipulation ────────────────────────────────────────────
+    grabState: GrabState | null
+
+    // ── Two-Hand Tracking ─────────────────────────────────────────────────────
+    twoHandData: TwoHandData | null
+
+    // ── System States ─────────────────────────────────────────────────────────
+    powerMode: boolean
+    powerModeStartTime: number | null
+    powerModeAmplifier: number  // 2.5x
+    radialMenuOpen: boolean
+    airDrawActive: boolean
+    uiHidden: boolean
+
+    // ── Orbit ─────────────────────────────────────────────────────────────────
+    orbitState: OrbitState
+    orbitActive: boolean
+    orbitCenter: { x: number; y: number } | null
+    orbitRadius: number
+
+    // ── Hold Gesture Tracking ─────────────────────────────────────────────────
+    holdGestureStart: number | null
+    holdGestureName: GestureName | null
+    holdTriggered: boolean
+
+    // ── Last Event (for GestureFlash etc.) ────────────────────────────────────
+    lastGestureEvent: GestureEvent | null
+
+    // ── Air Draw ──────────────────────────────────────────────────────────────
+    airDrawColor: string
+
+    // ─── Actions ────────────────────────────────────────────────────────────
+    setCameraActive: (active: boolean) => void
+    setWebcamSupported: (value: boolean) => void
+    setCameraError: (error: string | null) => void
+    setMediaPipeReady: (ready: boolean) => void
+    setCalibrated: (calibrated: boolean) => void
+    setCalibrationStep: (step: CalibrationStep) => void
+
+    updateDetectedHands: (hands: DetectedHand[]) => void
+    setCurrentGesture: (gesture: GestureName, confidence: number, hand: 'Left' | 'Right' | null) => void
+    updatePerformance: (fps: number, latency: number) => void
+    setSensitivity: (s: number) => void
+
+    pushLandmarkHistory: (frame: Float32Array) => void
+    clearLandmarkHistory: () => void
+
+    updateGestureDebounce: (gesture: GestureName) => void
+    isGestureDebounced: (gesture: GestureName) => boolean
+
+    setGrabState: (state: GrabState | null) => void
+    setTwoHandData: (data: TwoHandData | null) => void
+
+    setPowerMode: (active: boolean) => void
+    setRadialMenuOpen: (open: boolean) => void
+    setAirDrawActive: (active: boolean) => void
+    setUiHidden: (hidden: boolean) => void
+
+    setOrbitActive: (active: boolean, center?: { x: number; y: number }, radius?: number) => void
+
+    startHoldGesture: (gesture: GestureName) => void
+    clearHoldGesture: () => void
+    setHoldTriggered: (triggered: boolean) => void
+
+    fireGestureEvent: (event: GestureEvent) => void
+    setAirDrawColor: (color: string) => void
+
+    reset: () => void
 }
 
-const defaultState = {
-    cameraActive: false,
-    engineReady: false,
-    webcamSupported: true,
-    detectedHands: [],
-    currentGesture: "none" as GestureName,
-    gestureConfidence: 0,
-    lastGestureEvent: null,
-    isCalibrated: false,
-    calibrationStep: 0,
-    sensitivity: 0.7,
-    dominantHand: "right" as const,
-    fps: 0,
-    latency: 0,
-    landmarkHistory: [],
-};
+// ─── Initial State ────────────────────────────────────────────────────────────
 
-export const useGestureStore = create<GestureState>()((set, get) => ({
-    ...defaultState,
+function makeSwipeState(): SwipeState {
+    return { history: [], lastSwipeGesture: null, lastSwipeTime: 0 }
+}
 
-    setCameraActive: (active) => set({ cameraActive: active }),
-    setEngineReady: (ready) => set({ engineReady: ready }),
-    setWebcamSupported: (supported) => set({ webcamSupported: supported }),
+// ─── Store ────────────────────────────────────────────────────────────────────
 
-    setDetectedHands: (hands) => set({ detectedHands: hands }),
+export const useGestureStore = create<GestureState>()(
+    subscribeWithSelector((set, get) => ({
+        // ── Camera & Engine ──────────────────────────────────────────────────────
+        isCameraActive: false,
+        cameraError: null,
+        isMediaPipeReady: false,
+        isCalibrated: false,
+        calibrationStep: 'idle',
+        webcamSupported: true,
 
-    setCurrentGesture: (gesture, confidence) =>
-        set({ currentGesture: gesture, gestureConfidence: confidence }),
+        // ── Detection Results ─────────────────────────────────────────────────────
+        detectedHands: [],
+        currentGesture: 'none',
+        currentConfidence: 0,
+        currentHand: null,
 
-    setLastGestureEvent: (event) => set({ lastGestureEvent: event }),
+        // ── Performance ───────────────────────────────────────────────────────────
+        fps: 0,
+        latencyMs: 0,
+        frameCount: 0,
+        lastFrameTime: 0,
+        sensitivity: 1.0,
 
-    setCalibrated: (calibrated) => set({ isCalibrated: calibrated }),
-    setCalibrationStep: (step) => set({ calibrationStep: step }),
-    setSensitivity: (sensitivity) => set({ sensitivity }),
-    setDominantHand: (hand) => set({ dominantHand: hand }),
-    setFps: (fps) => set({ fps }),
-    setLatency: (latency) => set({ latency }),
+        // ── Landmark History ──────────────────────────────────────────────────────
+        landmarkHistory: [],
+        historyMaxLength: 30,
 
-    pushLandmarkHistory: (landmarks) => {
-        const history = get().landmarkHistory;
-        const updated = [...history, landmarks].slice(-10); // keep last 10 frames
-        set({ landmarkHistory: updated });
-    },
+        // ── Swipe State ───────────────────────────────────────────────────────────
+        swipeState: makeSwipeState(),
+        leftSwipeState: makeSwipeState(),
+        rightSwipeState: makeSwipeState(),
+        gestureDebounceMap: new Map(),
+        lastSwipeGesture: null,
+        lastSwipeTime: 0,
 
-    reset: () => set(defaultState),
-}));
+        // ── Wave ──────────────────────────────────────────────────────────────────
+        waveState: createWaveState(),
+
+        // ── Snap ──────────────────────────────────────────────────────────────────
+        snapState: createSnapState(),
+
+        // ── Grab ──────────────────────────────────────────────────────────────────
+        grabState: null,
+
+        // ── Two-Hand ──────────────────────────────────────────────────────────────
+        twoHandData: null,
+
+        // ── System ────────────────────────────────────────────────────────────────
+        powerMode: false,
+        powerModeStartTime: null,
+        powerModeAmplifier: 2.5,
+        radialMenuOpen: false,
+        airDrawActive: false,
+        uiHidden: false,
+
+        // ── Orbit ─────────────────────────────────────────────────────────────────
+        orbitState: createOrbitState(),
+        orbitActive: false,
+        orbitCenter: null,
+        orbitRadius: 0,
+
+        // ── Hold ──────────────────────────────────────────────────────────────────
+        holdGestureStart: null,
+        holdGestureName: null,
+        holdTriggered: false,
+
+        // ── Events ────────────────────────────────────────────────────────────────
+        lastGestureEvent: null,
+
+        // ── Air Draw ──────────────────────────────────────────────────────────────
+        airDrawColor: '#6366f1',
+
+        // ─── Actions ─────────────────────────────────────────────────────────────
+
+        setCameraActive: (active) => set({ isCameraActive: active }),
+
+        setWebcamSupported: (value: boolean) => set({ webcamSupported: value }),
+        setCameraError: (error) => set({ cameraError: error }),
+        setMediaPipeReady: (ready) => set({ isMediaPipeReady: ready }),
+        setCalibrated: (calibrated) => set({ isCalibrated: calibrated }),
+        setCalibrationStep: (step) => set({ calibrationStep: step }),
+        setHand: (hand) => set({ currentHand: hand }),
+        updateDetectedHands: (hands) => set({ detectedHands: hands }),
+
+        setCurrentGesture: (gesture, confidence, hand) =>
+            set({ currentGesture: gesture, currentConfidence: confidence, currentHand: hand }),
+
+        updatePerformance: (fps, latency) =>
+            set((s) => ({
+                fps,
+                latencyMs: latency,
+                frameCount: s.frameCount + 1,
+                lastFrameTime: Date.now(),
+            })),
+
+        setSensitivity: (s) => set({ sensitivity: Math.max(0.5, Math.min(1.5, s)) }),
+
+        pushLandmarkHistory: (frame) =>
+            set((s) => {
+                const next = [...s.landmarkHistory, frame]
+                if (next.length > s.historyMaxLength) next.shift()
+                return { landmarkHistory: next }
+            }),
+
+        clearLandmarkHistory: () => set({ landmarkHistory: [] }),
+
+        updateGestureDebounce: (gesture) =>
+            set((s) => {
+                const map = new Map(s.gestureDebounceMap)
+                map.set(gesture, Date.now())
+                return { gestureDebounceMap: map }
+            }),
+
+        isGestureDebounced: (gesture) => {
+            const { gestureDebounceMap } = get()
+            const lastFired = gestureDebounceMap.get(gesture)
+            if (lastFired === undefined) return false
+            // Import cooldown map dynamically to avoid circular deps
+            const COOLDOWNS: Partial<Record<GestureName, number>> = {
+                swipe_left: 400, swipe_right: 400, swipe_up: 400, swipe_down: 400,
+                snap: 300, wave: 600, thumbs_up: 500, thumbs_down: 500,
+            }
+            const cooldown = COOLDOWNS[gesture] ?? 0
+            return Date.now() - lastFired < cooldown
+        },
+
+        setGrabState: (state) => set({ grabState: state }),
+        setTwoHandData: (data) => set({ twoHandData: data }),
+
+        setPowerMode: (active) =>
+            set({
+                powerMode: active,
+                powerModeStartTime: active ? Date.now() : null,
+            }),
+
+        setRadialMenuOpen: (open) => set({ radialMenuOpen: open }),
+        setAirDrawActive: (active) => set({ airDrawActive: active }),
+        setUiHidden: (hidden) => set({ uiHidden: hidden }),
+
+        setOrbitActive: (active, center?, radius?) =>
+            set({
+                orbitActive: active,
+                orbitCenter: center ?? null,
+                orbitRadius: radius ?? 0,
+            }),
+
+        startHoldGesture: (gesture) =>
+            set({
+                holdGestureStart: Date.now(),
+                holdGestureName: gesture,
+                holdTriggered: false,
+            }),
+
+        clearHoldGesture: () =>
+            set({
+                holdGestureStart: null,
+                holdGestureName: null,
+                holdTriggered: false,
+            }),
+
+        setHoldTriggered: (triggered) => set({ holdTriggered: triggered }),
+
+        fireGestureEvent: (event) => set({ lastGestureEvent: event }),
+
+        setAirDrawColor: (color) => set({ airDrawColor: color }),
+
+        reset: () =>
+            set({
+                detectedHands: [],
+                currentGesture: 'none',
+                currentConfidence: 0,
+                currentHand: null,
+                grabState: null,
+                twoHandData: null,
+                powerMode: false,
+                powerModeStartTime: null,
+                radialMenuOpen: false,
+                airDrawActive: false,
+                uiHidden: false,
+                orbitActive: false,
+                orbitCenter: null,
+                orbitRadius: 0,
+                holdGestureStart: null,
+                holdGestureName: null,
+                holdTriggered: false,
+                landmarkHistory: [],
+                lastGestureEvent: null,
+                swipeState: makeSwipeState(),
+                leftSwipeState: makeSwipeState(),
+                rightSwipeState: makeSwipeState(),
+                gestureDebounceMap: new Map(),
+                waveState: createWaveState(),
+                snapState: createSnapState(),
+                orbitState: createOrbitState(),
+            }),
+    }))
+)
