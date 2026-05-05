@@ -35,7 +35,7 @@ const STEPS: CalibrationStep[] = [
         id: 2,
         title: "Closed Fist",
         instruction: "Now make a fist. Hold it steady for 2 seconds.",
-        gesture: "closed_fist",
+        gesture: "fist",
         emoji: "✊",
         duration: 2000,
     },
@@ -69,7 +69,7 @@ export default function CalibrationFlow({ onComplete, onSkip }: CalibrationFlowP
     const [dominantHand, setDominantHand] = useState<"left" | "right">("right");
     const progressRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-    const { setCalibrated, setSensitivity, setDominantHand: storeSetHand, setCalibrationStep } =
+    const { setCalibrated, setSensitivity, setHand: storeSetHand, setCalibrationStep } =
         useGestureStore();
     const { updateGesturePreferences } = useAuthStore();
     const { videoRef, startCamera } = useWebcam();
@@ -79,7 +79,15 @@ export default function CalibrationFlow({ onComplete, onSkip }: CalibrationFlowP
     }, [startCamera]);
 
     useEffect(() => {
-        setCalibrationStep(step);
+        const stepMap: Record<number, any> = {
+            0: 'idle',
+            1: 'open_palm',
+            2: 'fist',
+            3: 'pinch',
+            4: 'complete',
+        };
+
+        setCalibrationStep(stepMap[step] ?? 'idle');
     }, [step, setCalibrationStep]);
 
     const currentStep = STEPS[step];
@@ -118,7 +126,7 @@ export default function CalibrationFlow({ onComplete, onSkip }: CalibrationFlowP
     };
 
     const handleComplete = async () => {
-        storeSetHand(dominantHand);
+        storeSetHand(dominantHand === "left" ? "Left" : "Right");
         setSensitivity(0.7);
         setCalibrated(true);
 
