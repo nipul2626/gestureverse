@@ -1,0 +1,57 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Node
+node_modules
+.pnpm-store
+.npm
+.yarn
+
+# Build
+dist
+dist-ssr
+.vite
+node_modules/.vite
+
+# Environment variables
+.env
+.env.*
+!.env.example
+.env.local
+.env.development.local
+.env.production.local
+
+# Secrets
+*.pem
+*.key
+*.crt
+serviceAccountKey.json
+
+# TypeScript
+*.tsbuildinfo
+
+# Coverage / testing
+coverage
+.vitest
+
+# Editor files
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# OS files
+.DS_Store
+.DS_Store?
+Thumbs.db
+Icon?
+
+# Temp files
+*.tmp
+*.temp
+*.local
